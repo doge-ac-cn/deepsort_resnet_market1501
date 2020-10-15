@@ -3,6 +3,7 @@ import paddle.fluid as fluid
 from PIL import Image
 import os
 import numpy as np
+from paddle.fluid.dygraph import to_variable, TracedLayer
 
 from deepsort_net import Mylayer
 
@@ -10,7 +11,7 @@ from deepsort_net import Mylayer
 train_dir = "dataset/people_reid/train"
 test_dir = "dataset/people_reid/val"
 BATCH_SIZE = 128
-NUM_EPOCHES = 1000
+NUM_EPOCHES = 60
 RANDOM_POOL_SIZE = 100000  # 随机池
 num_classes = 751
 # 指定gpu
@@ -26,9 +27,9 @@ def train_generater():
 
             for image_name in os.listdir(train_dir + "/" + class_name):
                 image_path = train_dir + "/" + class_name + "/" + image_name
-                image = Image.open(image_path).resize((64, 128), Image.ANTIALIAS)
+                image = Image.open(image_path).resize((128, 64), Image.ANTIALIAS)
                 image = np.array(image).astype(np.float32)
-                image = np.reshape(image, [3, 64, 128])
+                image = np.reshape(image, [3, 128, 64])
 
                 yield image / 255.0 * 2.0 - 1.0, imageclass
             imageclass += 1
@@ -44,12 +45,28 @@ def test_generater():
 
             for image_name in os.listdir(test_dir + "/" + class_name):
                 image_path = test_dir + "/" + class_name + "/" + image_name
-                image = Image.open(image_path).resize((64, 128), Image.ANTIALIAS)
+                image = Image.open(image_path).resize((128, 64), Image.ANTIALIAS)
                 image = np.array(image).astype(np.float32)
-                image = np.reshape(image, [3, 64, 128])
+                image = np.reshape(image, [3, 128, 64])
 
                 yield image / 255.0 * 2.0 - 1.0, imageclass
             imageclass += 1
+
+    return __reader__
+
+
+# 指定投入预测数据的reader生成器
+def predict_generater():
+    def __reader__():
+
+        for class_name in os.listdir(test_dir):
+
+            for image_name in os.listdir(test_dir + "/" + class_name):
+                image_path = test_dir + "/" + class_name + "/" + image_name
+                image = Image.open(image_path).resize((128, 64), Image.ANTIALIAS)
+                image = np.array(image).astype(np.float32)
+                image = np.reshape(image, [3, 128, 64])
+                yield image / 255.0 * 2.0 - 1.0
 
     return __reader__
 
@@ -62,9 +79,11 @@ train_loader.set_sample_generator(paddle.reader.shuffle(train_generater(), RANDO
 test_loader = fluid.io.DataLoader.from_generator(capacity=10)
 test_loader.set_sample_generator(test_generater(), batch_size=BATCH_SIZE, places=place)
 
+predict_loader = fluid.io.DataLoader.from_generator(capacity=10)
+predict_loader.set_sample_generator(predict_generater(), batch_size=1, places=place)
+
 # 初始化神经网络
 DeepSortNet = Mylayer()
-
 # 添加优化器
 adam = fluid.optimizer.AdamOptimizer(learning_rate=0.001, parameter_list=DeepSortNet.parameters())
 
@@ -92,9 +111,7 @@ with fluid.dygraph.guard():
             # 清除梯度
             adam.clear_gradients()
             accuracy_manager.update(acc.numpy(), BATCH_SIZE)
-
-        print("train accuracy: %.6f , loss %.2f" % ( accuracy_manager.eval(), loss))
-
+        print("train accuracy: %.6f , loss %.2f" % (accuracy_manager.eval(), loss))
         # 评估
         DeepSortNet.eval()
         accuracy_manager = fluid.metrics.Accuracy()
@@ -111,3 +128,6 @@ with fluid.dygraph.guard():
             # 每隔十次训练,输出一次准确率
 
         print("test accuracy: %.6f , loss %.2f" % (accuracy_manager.eval(), loss))
+
+    out_dygraph, static_layer = TracedLayer.trace(DeepSortNet, inputs=[image])
+    static_layer.save_inference_model('infer_model')

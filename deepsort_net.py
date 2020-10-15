@@ -80,22 +80,22 @@ class Mylayer(fluid.dygraph.Layer):
         super(Mylayer, self).__init__()
         self.num_classes = num_classes
         self.conv = fluid.dygraph.Sequential(
-            Conv2D(num_channels=3, num_filters=64, filter_size=3, stride=1, padding=1),
-            BatchNorm(64, act="relu", in_place=True),
+            Conv2D(num_channels=3, num_filters=32, filter_size=3, stride=1, padding=1),
+            BatchNorm(32, act="relu", in_place=True),
             Pool2D(pool_size=3, pool_stride=2, pool_padding=1, pool_type='max')
         )
 
-        self.layer1 = BottleneckBlock(64, 64, 2, True)
-        self.layer2 = BottleneckBlock(64, 128, 2, False)
-        self.layer3 = BottleneckBlock(128, 256, 2, False)
-        self.layer4 = BottleneckBlock(256, 512, 2, False)
-        self.avg_pool = Pool2D(pool_size=(4, 8), pool_stride=1, pool_type='avg')
+        self.layer1 = BottleneckBlock(32, 32, 2, True)
+        self.layer2 = BottleneckBlock(32, 64, 2, False)
+        # self.layer3 = BottleneckBlock(64, 64, 2, True)
+        self.layer4 = BottleneckBlock(64, 128, 2, False)
+        self.avg_pool = Pool2D(pool_size=(16, 8), pool_stride=1, pool_type='avg')
 
         self.classifier = fluid.dygraph.Sequential(
-            Linear(512, 256),
-            BatchNorm(256, in_place=True, act='relu'),
+            Linear(128, 128),
+            BatchNorm(128, in_place=True, act='relu'),
             Dropout(0.5),
-            Linear(256, num_classes, act='softmax'),
+            Linear(128, num_classes, act='softmax'),
         )
 
     # 传label进来就用于训练，不传就只输出特征
@@ -106,7 +106,7 @@ class Mylayer(fluid.dygraph.Layer):
         x = self.conv(x)
         x = self.layer1(x)
         x = self.layer2(x)
-        x = self.layer3(x)
+        # x = self.layer3(x)
         x = self.layer4(x)
         x = self.avg_pool(x)
         x = fluid.layers.reshape(x, [x.shape[0], x.shape[1]])
