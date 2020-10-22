@@ -1,75 +1,58 @@
+import paddle
 from paddle import fluid
 from paddle.fluid.dygraph.nn import *
-
-
-class ConvBNLayer(fluid.dygraph.Layer):
-    def __init__(self, num_channels, num_filters, filter_size, stride=1, groups=1, act=None):
-        """
-        num_channels, 卷积层的输入通道数
-        num_filters, 卷积层的输出通道数
-        stride, 卷积层的步幅
-        groups, 分组卷积的组数，默认groups=1不使用分组卷积
-        act, 激活函数类型，默认act=None不使用激活函数
-        """
-        super(ConvBNLayer, self).__init__()
-        # 创建卷积层,bias为false,不在后面加激活层
-        self.conv = Conv2D(num_channels=num_channels, num_filters=num_filters,
-                           filter_size=filter_size, stride=stride, padding=(filter_size - 1) // 2,
-                           groups=groups, act=None, bias_attr=False)
-        # 创建BatchNorm层
-        self.batch_norm = BatchNorm(num_filters, act=act)
-
-    def forward(self, inputs):
-        y = self.conv(inputs)
-        y = self.batch_norm(y)
-        return y
 
 
 # 定义残差块
 # 每个残差块会对输入图片做三次卷积，然后跟输入图片进行短接
 # 如果残差块中第三次卷积输出特征图的形状与输入不一致，则对输入图片做1x1卷积，将其输出形状调整成一致
 class BottleneckBlock(fluid.dygraph.Layer):
-    def __init__(self, num_channels, num_filters, stride, shortcut=True):
+    def __init__(self, num_channels, num_filters, is_downsample):
         super(BottleneckBlock, self).__init__()
-        self.shortcut = shortcut
+        self.is_downsample = is_downsample
 
         # 创建第一个卷积层 3x3
-        if not shortcut:
-            self.conv0 = ConvBNLayer(num_channels=num_channels, num_filters=num_filters, filter_size=3, stride=2,
-                                     act='relu')
-
+        # 如果下采样，则步长为2，降低特征图大小
+        if is_downsample:
+            self.conv0 = fluid.dygraph.Sequential(
+                Conv2D(num_channels=num_channels, num_filters=num_filters, filter_size=3, stride=2, padding=1,
+                       bias_attr=False),
+                BatchNorm(num_filters, act="relu"),
+            )
+        # 不下采样则步长为1
         else:
-            self.conv0 = ConvBNLayer(num_channels=num_channels, num_filters=num_filters, filter_size=3, stride=1,
-                                     act='relu')
+            self.conv0 = fluid.dygraph.Sequential(
+                Conv2D(num_channels=num_channels, num_filters=num_filters, filter_size=3, stride=1, padding=1,
+                       bias_attr=False),
+                BatchNorm(num_filters, act="relu"),
+            )
 
         # 创建第二个卷积层 3x3
-        self.conv1 = ConvBNLayer(num_channels=num_filters, num_filters=num_filters, filter_size=3,
-                                 stride=1, act=None)
+        self.conv1 = fluid.dygraph.Sequential(
+            Conv2D(num_channels=num_filters, num_filters=num_filters, filter_size=3, stride=1, padding=1,
+                   bias_attr=False),
+            BatchNorm(num_filters),
+        )
 
-        # 创建第三个卷积 1x1
-        self.conv2 = ConvBNLayer(num_channels=num_filters, num_filters=num_filters, filter_size=1,
-                                 act=None)
-        # 如果conv2的输出跟此残差块的输入数据形状一致，则shortcut=True
-        # 否则shortcut = False，添加1个1x1的卷积作用在输入数据上，使其形状变成跟conv2一致
-        if not shortcut:
-            self.short = ConvBNLayer(num_channels=num_channels, num_filters=num_filters,
-                                     filter_size=1, stride=stride)
+        # 如果下采样,则输入shortcut前,要先用步长为2的1x1卷积下降特征图大小为[原长/2,原宽/2]
+        if is_downsample:
+            self.downsample = fluid.dygraph.Sequential(
+                Conv2D(num_channels=num_channels, num_filters=num_filters, filter_size=1, stride=2,
+                       bias_attr=False),
+                BatchNorm(num_filters),
+            )
 
     def forward(self, inputs):
         y = self.conv0(inputs)
         conv1 = self.conv1(y)
-        conv2 = self.conv2(conv1)
-        # 如果shortcut=True，直接将inputs跟conv2的输出相加
-        # 否则需要对inputs进行一次卷积，将形状调整成跟conv2输出一致
-        if self.shortcut:
-            short = inputs
+
+        if self.is_downsample:
+            downsample = self.downsample(inputs)
         else:
-            short = self.short(inputs)
+            downsample = inputs
 
         # 输入和最后一层卷积的输出相加
-        y = fluid.layers.elementwise_add(x=short, y=conv2)
-        y = fluid.layers.relu(y)
-
+        y = fluid.layers.elementwise_add(x=downsample, y=conv1, act="relu")
         return y
 
 
@@ -81,45 +64,60 @@ class Mylayer(fluid.dygraph.Layer):
         self.num_classes = num_classes
         self.conv = fluid.dygraph.Sequential(
             Conv2D(num_channels=3, num_filters=32, filter_size=3, stride=1, padding=1),
+            # Conv2D(num_channels=32, num_filters=32, filter_size=3, stride=1, padding=1),
             BatchNorm(32, act="relu", in_place=True),
             Pool2D(pool_size=3, pool_stride=2, pool_padding=1, pool_type='max')
         )
 
-        self.layer1 = BottleneckBlock(32, 32, 2, True)
-        self.layer2 = BottleneckBlock(32, 64, 2, False)
-        # self.layer3 = BottleneckBlock(64, 64, 2, True)
-        self.layer4 = BottleneckBlock(64, 128, 2, False)
-        self.avg_pool = Pool2D(pool_size=(16, 8), pool_stride=1, pool_type='avg')
+        self.layer1 = BottleneckBlock(32, 32, False)
+        self.layer2 = BottleneckBlock(32, 32, False)
+        self.layer3 = BottleneckBlock(32, 64, True)
+        self.layer4 = BottleneckBlock(64, 64, False)
+        self.layer5 = BottleneckBlock(64, 128, True)
+        self.layer6 = BottleneckBlock(128, 128, False)
+        self.global_avg_pool = Pool2D(pool_type='avg', global_pooling=True)
 
         self.classifier = fluid.dygraph.Sequential(
             Linear(128, 128),
-            BatchNorm(128, in_place=True, act='relu'),
-            Dropout(0.5),
-            Linear(128, num_classes, act='softmax'),
+            BatchNorm(128, act='relu', in_place=True),
+            Dropout(),
+            # Linear(128, num_classes)
+
         )
+        self.fc = Linear(128, self.num_classes, bias_attr=False)
+        self.scale = paddle.fluid.layers.create_parameter(shape=[self.num_classes], dtype="float32")
 
     # 传label进来就用于训练，不传就只输出特征
     def forward(self, x, label=None):
-        # torch.Size([64, 3, 128, 64])
-        # input shape [16, 64, 128, 3]
 
         x = self.conv(x)
         x = self.layer1(x)
         x = self.layer2(x)
-        # x = self.layer3(x)
+        x = self.layer3(x)
         x = self.layer4(x)
-        x = self.avg_pool(x)
-        x = fluid.layers.reshape(x, [x.shape[0], x.shape[1]])
-        # B x 128
-        if label is not None:
-            # classifier
-            x = self.classifier(x)
-            loss = fluid.layers.cross_entropy(x, label)
+        x = self.layer5(x)
+        x = self.layer6(x)
+        # GAP层，全局平均最大池化
+        x = self.global_avg_pool(x)
+        # 把(1,1,x,x)压缩为(x,x)
+        x = fluid.layers.flatten(x, axis=1)
 
+        # if label is not None:
+        x = self.classifier(x)
+
+        # 深度余弦度量
+        scale = paddle.fluid.layers.l2_normalize(self.scale, axis=-1, epsilon=0.1)
+        scale = paddle.fluid.layers.softplus(scale)
+        x = self.fc(x)
+        x = paddle.fluid.layers.elementwise_mul(scale, x)
+
+        if label is not None:
+            # 计算准确率和loss
+            label = fluid.layers.unsqueeze(label, axes=[1])
+            loss = fluid.layers.softmax_with_cross_entropy(x, label)
             avg_loss = fluid.layers.mean(loss)
             label = fluid.layers.reshape(label, [label.shape[0], 1])
             acc = fluid.layers.accuracy(x, label)
             return acc, avg_loss
         else:
-            # x = x.div(x.norm(p=2, dim=1, keepdim=True))
             return x
